@@ -69,6 +69,21 @@ EXCHANGE_SCREENER = {
     "tasi": "ksa",          # alias: Tadawul All Share Index
 }
 
+# Venues TradingView serves for single-symbol TA (tradingview-ta) but NOT via the
+# scanner (tradingview-screener returns 0 rows for the "forex"/"cfd" markets).
+# Kept SEPARATE from EXCHANGE_SCREENER on purpose: scanner / multi-timeframe paths
+# read EXCHANGE_SCREENER through get_market_type(), so isolating these here means
+# those paths keep their existing behaviour and never query an unsupported market.
+_TA_ONLY_SCREENERS: dict = {
+    # Forex (currency pairs): EUR/USD, GBP/USD, USD/TRY, USD/JPY …
+    "oanda": "forex",
+    "fx_idc": "forex",
+    "fxcm": "forex",
+    # CFD: spot metals (GOLD, SILVER), indices (DXY, SPX) …
+    "tvc": "cfd",
+    "capitalcom": "cfd",
+}
+
 # Map validated exchange identifiers to their canonical TradingView symbol prefix.
 # TradingView uses "AMEX" as the prefix for all NYSE Arca / ETF listings; passing
 # "NYSE:GDX" returns no data even though GDX trades on NYSE Arca.
@@ -113,6 +128,17 @@ _TRADINGVIEW_SYMBOL_ALIASES: dict = {
     "IX0001": "TWSE:IX0001",
     "TWSE:TAIEX": "TWSE:IX0001",
     "TWSE:IX0001": "TWSE:IX0001",
+    # Spot precious metals & USD index are CFDs on TradingView (screener "cfd"),
+    # not crypto/forex. Pin them to a venue that actually serves the data so a
+    # bare "gold"/"XAUUSD" request resolves correctly regardless of the exchange
+    # the caller guessed (KuCoin etc. has no XAU/XAG/DXY).
+    "XAUUSD": "TVC:GOLD",
+    "GOLD": "TVC:GOLD",
+    "XAU": "TVC:GOLD",
+    "XAGUSD": "TVC:SILVER",
+    "SILVER": "TVC:SILVER",
+    "XAG": "TVC:SILVER",
+    "DXY": "TVC:DXY",
 }
 
 
@@ -161,7 +187,9 @@ def sanitize_exchange(ex: str, default: str = "kucoin") -> str:
     if not ex:
         return default
     exs = ex.strip().lower()
-    return exs if exs in EXCHANGE_SCREENER else default
+    if exs in EXCHANGE_SCREENER or exs in _TA_ONLY_SCREENERS:
+        return exs
+    return default
 
 
 def is_stock_exchange(exchange: str) -> bool:
@@ -172,3 +200,20 @@ def is_stock_exchange(exchange: str) -> bool:
 def get_market_type(exchange: str) -> str:
     """Return the TradingView market type for screener queries."""
     return EXCHANGE_SCREENER.get(exchange.strip().lower(), "crypto")
+
+
+def resolve_screener_for_symbol(full_symbol: str, exchange: str) -> str:
+    """Pick the TradingView screener for an already-resolved symbol.
+
+    A single venue can host assets needing *different* screeners
+    (``OANDA:EURUSD`` → ``forex`` but ``OANDA:XAUUSD`` → ``cfd``), and symbol
+    aliases can redirect to another venue (``XAUUSD`` → ``TVC:GOLD``). So the
+    screener must follow the *final* symbol's prefix, not the exchange the
+    caller originally passed. Falls back to the exchange's screener (then
+    ``crypto``) when the symbol carries no explicit prefix.
+    """
+    prefix = (full_symbol.split(":", 1)[0] if ":" in full_symbol
+              else (exchange or "")).strip().lower()
+    return (EXCHANGE_SCREENER.get(prefix)
+            or _TA_ONLY_SCREENERS.get(prefix)
+            or "crypto")
